@@ -1068,25 +1068,27 @@ async def cancel_order(bot: Bot, chat_id: int, order_code: str,
     1. Xóa TẤT CẢ tin nhắn QR của đơn
     2. Xóa tin nhắn "huy" của user
     3. Gửi thông báo "Đã hủy đơn bởi..." — để mãi trong nhóm
-    4. Cập nhật DB status = cancelled
+    4. Nếu đã gửi collect → edit card thành "Đã hủy"
+    5. Cập nhật DB status = cancelled
     """
     conn = db_connect()
     cur = conn.cursor()
 
-    # Lấy tất cả message QR
+    # Lấy tất cả message QR + collect_message_id
     cur.execute(
         "SELECT message_id FROM order_messages WHERE chat_id=? AND order_code=? ORDER BY message_id ASC",
         (chat_id, order_code)
     )
     mids = [r["message_id"] for r in cur.fetchall()]
 
-    # Lấy thêm creator_message_id (form gốc người dùng gửi) — xóa luôn
     cur.execute(
-        "SELECT creator_message_id FROM orders WHERE order_code=?",
+        "SELECT creator_message_id, collect_message_id FROM orders WHERE order_code=?",
         (order_code,)
     )
     crow = cur.fetchone()
-    creator_mid = crow["creator_message_id"] if crow else None
+    creator_mid     = crow["creator_message_id"] if crow else None
+    collect_mid     = crow["collect_message_id"] if crow else None
+    conn.close()
 
     # Xóa tất cả QR
     for mid in mids:
@@ -1108,18 +1110,49 @@ async def cancel_order(bot: Bot, chat_id: int, order_code: str,
     except Exception:
         pass
 
-    # Gửi thông báo hủy — để mãi
+    # Gửi thông báo hủy — để mãi trong Group QR
+    cancelled_at = now_local().strftime('%H:%M %d/%m/%Y')
     await bot.send_message(
         chat_id=chat_id,
         text=(
             f"🚫 <b>Đã hủy đơn</b> <code>{order_code}</code>\n"
             f"👤 Hủy bởi: {cancelled_by}\n"
-            f"🕐 {now_local().strftime('%H:%M %d/%m/%Y')}"
+            f"🕐 {cancelled_at}"
         ),
         parse_mode="HTML",
     )
 
+    # Nếu đã gửi card sang Group Collect → edit thành "Đã hủy"
+    if collect_mid and COLLECT_GROUP_ID:
+        cancelled_text = (
+            f"🚫 <b>ĐƠN ĐÃ HỦY</b>\n"
+            f"📦 Mã đơn: <b><code>{order_code}</code></b>\n"
+            f"👤 Hủy bởi: {cancelled_by}\n"
+            f"🕐 {cancelled_at}"
+        )
+        try:
+            await bot.edit_message_text(
+                chat_id=COLLECT_GROUP_ID,
+                message_id=collect_mid,
+                text=cancelled_text,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning("Không edit được card collect khi hủy: %s", e)
+            # Fallback: reply thông báo vào card
+            try:
+                await bot.send_message(
+                    chat_id=COLLECT_GROUP_ID,
+                    text=f"🚫 <b>Đơn <code>{order_code}</code> đã bị hủy</b> bởi {cancelled_by}",
+                    parse_mode="HTML",
+                    reply_to_message_id=collect_mid,
+                )
+            except Exception:
+                pass
+
     # Cập nhật DB
+    conn = db_connect()
+    cur = conn.cursor()
     cur.execute("DELETE FROM order_messages WHERE chat_id=? AND order_code=?", (chat_id, order_code))
     cur.execute("UPDATE orders SET status='cancelled' WHERE order_code=?", (order_code,))
     conn.commit()
