@@ -110,7 +110,15 @@ async def _get_order_lock(order_code: str) -> asyncio.Lock:
 # ─────────────────────────── DB HELPERS ──────────────────────────────────────
 
 def now_local() -> datetime:
-    return datetime.now()
+    """Trả về giờ hiện tại theo GMT+7 (Asia/Ho_Chi_Minh)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+    except Exception:
+        # Fallback: UTC+7 thủ công
+        from datetime import timezone, timedelta
+        tz_vn = timezone(timedelta(hours=7))
+        return datetime.now(tz_vn).replace(tzinfo=None)
 
 
 def db_connect() -> sqlite3.Connection:
