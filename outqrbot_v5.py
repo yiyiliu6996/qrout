@@ -267,7 +267,10 @@ BANK_ALIAS: dict[str, str] = {
     # Agribank
     "agribank":"agribank","agri":"agribank","vbard":"agribank","nongnghiep":"agribank",
     # MB Bank
-    "mb":"mb","mbbank":"mb","mbv":"mb","quandoi":"mb","militarybank":"mb",
+    "mb":"mb","mbbank":"mb","quandoi":"mb","militarybank":"mb",
+    # MBV — Ngân hàng TNHH MTV Việt Nam Hiện Đại (BIN 970414)
+    "mbv":"mbv","vietthienhai":"mbv","hiendai":"mbv",
+    "nganhanghiendai":"mbv","vietnamhiendai":"mbv",
     # Techcombank
     "tcb":"tcb","techcombank":"tcb","techcom":"tcb","kythuong":"tcb",
     # ACB
