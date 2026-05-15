@@ -67,6 +67,7 @@ def _load_config() -> dict:
             "DEFAULT_TRANSFER_CONTENT": os.environ.get("DEFAULT_TRANSFER_CONTENT", ""),
             "FORM_COOLDOWN_SECONDS":    int(os.environ.get("FORM_COOLDOWN_SECONDS", "3") or 3),
             "BANK_WHITELIST_ENABLED":   os.environ.get("BANK_WHITELIST_ENABLED", "false").lower() == "true",
+            "WHITELIST_MODE":           os.environ.get("WHITELIST_MODE", "blacklist"),
         }
 
     # Fallback: đọc config.json (local)
@@ -86,6 +87,7 @@ SUPER_ADMIN_IDS:         set[int] = set(_cfg["SUPER_ADMIN_IDS"])
 NOTIFY_GROUP_ID:         int      = _cfg["NOTIFY_GROUP_ID"]
 COLLECT_GROUP_ID:        int      = _cfg.get("COLLECT_GROUP_ID", 0)
 BANK_WHITELIST_ENABLED:  bool     = bool(_cfg.get("BANK_WHITELIST_ENABLED", False))
+WHITELIST_MODE:          str      = _cfg.get("WHITELIST_MODE", "blacklist")  # "blacklist" hoặc "strict"
 DEFAULT_TRANSFER_CONTENT: str     = _cfg.get("DEFAULT_TRANSFER_CONTENT", "")
 FORM_COOLDOWN_SECONDS:   int      = _cfg.get("FORM_COOLDOWN_SECONDS", 3)
 
@@ -2476,32 +2478,45 @@ async def cb_resetdb(callback: CallbackQuery, bot: Bot) -> None:
 
 def check_whitelist(receivers: list) -> list:
     """
-    Kiểm tra STK người nhận có trong receiver_whitelist không.
-    Chỉ check khi BANK_WHITELIST_ENABLED=True.
-    Trả về list lỗi (rỗng = OK).
+    Kiểm tra STK người nhận theo WHITELIST_MODE:
+      blacklist (mặc định):
+        - Tất cả STK đều được tạo QR
+        - Chỉ chặn STK có trong DB với is_active=0 (đã /tatbank)
+      strict:
+        - Chỉ STK có trong DB với is_active=1 mới được tạo QR
+        - STK không có trong DB → bị chặn
     """
-    if not BANK_WHITELIST_ENABLED:
-        return []
     conn = db_connect()
     cur = conn.cursor()
     errors = []
+
     for r in receivers:
         cur.execute(
-            "SELECT is_active, name, bank FROM receiver_whitelist WHERE account=?",
+            "SELECT is_active FROM receiver_whitelist WHERE account=?",
             (r["account"],)
         )
         row = cur.fetchone()
-        if not row:
-            errors.append(
-                f"⚠️ STK <code>{r['account']}</code> ({r['name']}) "
-                f"không có trong danh sách được phép. "
-                f"Admin dùng /update để cập nhật."
-            )
-        elif row["is_active"] == 0:
-            errors.append(
-                f"⚠️ STK <code>{r['account']}</code> ({r['name']}) "
-                f"đang bị tắt, không thể tạo QR."
-            )
+
+        if WHITELIST_MODE == "strict":
+            # Strict: phải có trong whitelist và is_active=1
+            if not row:
+                errors.append(
+                    f"⚠️ STK <code>{r['account']}</code> (<b>{r['name']}</b>) "
+                    f"không có trong danh sách được phép."
+                )
+            elif row["is_active"] == 0:
+                errors.append(
+                    f"🔴 STK <code>{r['account']}</code> (<b>{r['name']}</b>) "
+                    f"đang bị tắt, không thể tạo QR."
+                )
+        else:
+            # Blacklist (mặc định): chỉ chặn STK bị tắt
+            if row and row["is_active"] == 0:
+                errors.append(
+                    f"🔴 STK <code>{r['account']}</code> (<b>{r['name']}</b>) "
+                    f"đang bị tắt. Admin dùng /mobank để mở lại."
+                )
+
     conn.close()
     return errors
 
@@ -2934,10 +2949,11 @@ async def _reminder_loop(bot: Bot) -> None:
 async def _daily_report_loop(bot: Bot) -> None:
     """
     Tự động xuất báo cáo Excel cuối ngày lúc 23:30 GMT+7.
-    Gửi vào COLLECT_GROUP_ID và NOTIFY_GROUP_ID.
+    Mỗi Group QR nhận file riêng chỉ chứa đơn của group đó.
+    Đồng thời gửi bản tổng vào COLLECT_GROUP_ID.
     """
-    REPORT_HOUR   = 23   # giờ GMT+7
-    REPORT_MINUTE = 30
+    REPORT_HOUR   = 0
+    REPORT_MINUTE = 0
     last_report_date: Optional[str] = None
 
     while True:
@@ -2945,75 +2961,75 @@ async def _daily_report_loop(bot: Bot) -> None:
             now = now_local()
             today_str = now.strftime("%d/%m/%Y")
 
-            # Chạy lúc 23:30 và chưa gửi hôm nay
             if (now.hour == REPORT_HOUR and now.minute >= REPORT_MINUTE
                     and last_report_date != today_str):
 
-                rows = fetch_by_date(today_str)
+                # Báo cáo lúc 00:00 → lấy dữ liệu ngày HÔM QUA
+                from datetime import timedelta
+                report_date = (now - timedelta(days=1)).strftime("%d/%m/%Y")
+                safe_date   = (now - timedelta(days=1)).strftime("%d-%m-%Y")
+                cur = conn.cursor()
+                cur.execute("SELECT DISTINCT chat_id FROM activated_chats")
+                active_chats = [r["chat_id"] for r in cur.fetchall()]
+                conn.close()
 
-                if rows:
-                    safe_date = now.strftime("%d-%m-%Y")
+                has_any = False
+
+                for chat_id in active_chats:
+                    # Lấy đơn của riêng group này
+                    rows = fetch_by_date(report_date, chat_id=chat_id)
+                    if not rows:
+                        continue
+
+                    has_any = True
+                    total_orders = len(set(r["order_code"] for r in rows))
+                    total_amount = sum(r["amount"] for r in rows)
+                    completed    = sum(1 for r in rows if r["status"] == "completed")
+                    cancelled    = sum(1 for r in rows if r["status"] == "cancelled")
+                    group_name   = rows[0]["group_name"] or str(chat_id)
+
+                    caption = (
+                        f"📊 <b>Báo cáo ngày {report_date}</b>\n"
+                        f"🏘 {group_name}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📦 Tổng đơn   : <b>{total_orders}</b>\n"
+                        f"✅ Hoàn thành : <b>{completed}</b>\n"
+                        f"❌ Đã hủy     : <b>{cancelled}</b>\n"
+                        f"⏳ Chưa xử lý : <b>{total_orders - completed - cancelled}</b>\n"
+                        f"💰 Tổng tiền  : <b><code>{format_money(total_amount)}</code></b>"
+                    )
+
                     with tempfile.TemporaryDirectory() as tmpdir:
-                        fpath = os.path.join(tmpdir, f"baocao_{safe_date}.xlsx")
+                        fname_xlsx = f"baocao_{safe_date}.xlsx"
+                        fpath = os.path.join(tmpdir, fname_xlsx)
                         export_orders_to_excel(rows, fpath)
 
-                        # Thống kê nhanh
-                        total_orders = len(set(r["order_code"] for r in rows))
-                        total_amount = sum(r["amount"] for r in rows)
-                        completed    = sum(1 for r in rows if r["status"] == "completed")
-                        cancelled    = sum(1 for r in rows if r["status"] == "cancelled")
-
-                        caption = (
-                            f"📊 <b>Báo cáo cuối ngày {today_str}</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📦 Tổng đơn   : <b>{total_orders}</b>\n"
-                            f"✅ Hoàn thành : <b>{completed}</b>\n"
-                            f"❌ Đã hủy     : <b>{cancelled}</b>\n"
-                            f"⏳ Chưa xử lý : <b>{total_orders - completed - cancelled}</b>\n"
-                            f"💰 Tổng tiền  : <b><code>{format_money(total_amount)}</code></b>"
-                        )
-
                         from aiogram.types import FSInputFile
-                        xlsx_file = FSInputFile(fpath, filename=f"baocao_{safe_date}.xlsx")
 
-                        # Gửi vào COLLECT_GROUP
-                        if COLLECT_GROUP_ID:
-                            try:
-                                await bot.send_document(
-                                    chat_id=COLLECT_GROUP_ID,
-                                    document=xlsx_file,
-                                    caption=caption,
-                                    parse_mode="HTML",
-                                )
-                            except Exception as e:
-                                logger.warning("Gửi báo cáo collect thất bại: %s", e)
+                        # Gửi về đúng Group QR
+                        try:
+                            await bot.send_document(
+                                chat_id=chat_id,
+                                document=FSInputFile(fpath, filename=fname_xlsx),
+                                caption=caption,
+                                parse_mode="HTML",
+                            )
+                        except Exception as e:
+                            logger.warning("Gửi báo cáo group %s thất bại: %s", chat_id, e)
 
-                        # Gửi vào NOTIFY_GROUP
-                        if NOTIFY_GROUP_ID and NOTIFY_GROUP_ID != COLLECT_GROUP_ID:
-                            try:
-                                xlsx_file2 = FSInputFile(fpath, filename=f"baocao_{safe_date}.xlsx")
-                                await bot.send_document(
-                                    chat_id=NOTIFY_GROUP_ID,
-                                    document=xlsx_file2,
-                                    caption=caption,
-                                    parse_mode="HTML",
-                                )
-                            except Exception as e:
-                                logger.warning("Gửi báo cáo notify thất bại: %s", e)
+                    logger.info("Báo cáo %s group %s: %d đơn", today_str, chat_id, total_orders)
 
-                    logger.info("Đã gửi báo cáo ngày %s: %d đơn", today_str, total_orders)
-                else:
-                    # Không có đơn → chỉ thông báo text
-                    msg = f"📊 <b>Báo cáo {today_str}</b>\n\nKhông có đơn nào trong ngày hôm nay."
-                    await notify_system(bot, msg)
+                if not has_any:
+                    await notify_system(bot,
+                        f"📊 <b>Báo cáo ngày {report_date}</b>\n\nKhông có đơn nào trong ngày hôm nay.")
 
                 last_report_date = today_str
 
         except Exception as e:
             logger.error("_daily_report_loop lỗi: %s", e)
 
-        # Check mỗi phút
         await asyncio.sleep(60)
+
 
 async def main() -> None:
     init_db()
