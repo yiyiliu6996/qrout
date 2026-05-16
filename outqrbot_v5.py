@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║              outqrbot  V5  —  by Claude              ║
+║              outqrbot  V6  —  by Claude              ║
 ║  Tạo QR chuyển khoản hàng loạt qua Telegram Bot     ║
 ╚══════════════════════════════════════════════════════╝
 """
@@ -317,9 +317,12 @@ BANK_ALIAS: dict[str, str] = {
     "kienlongbank":"klb","klb":"klb","kienlong":"klb","umee":"klb",
     # VietBank
     "vietbank":"vietbank","thuongtin":"vietbank",
-    # BaoViet Bank
-    "baovietbank":"bvb","bvb":"bvb","baoviet":"bvb",
-    # CBBank
+    # BaoViet Bank — KHÔNG dùng bvb
+    "baovietbank":"baoviet","baoviet":"baoviet","bvbank":"baoviet","baovietbnk":"baoviet",
+    # VietCapitalBank (Bản Việt) — bvb = Bản Việt
+    "vietcapitalbank":"vcapital","bancviet":"vcapital","banviet":"vcapital",
+    "bvb":"vcapital","bvb2":"vcapital","vietcapital":"vcapital","vikki":"vcapital",
+    "banvietbank":"vcapital","nganhangbanviet":"vcapital",
     "cbbank":"cbb","cbb":"cbb","xaydung":"cbb",
     # OceanBank
     "oceanbank":"oceanbank","ocean":"oceanbank","daididuong":"oceanbank",
@@ -357,8 +360,7 @@ BANK_ALIAS: dict[str, str] = {
     "saigonbanksgbl":"sgbl","sgbl":"sgbl","saigoncongth":"sgbl","saigonbk":"sgbl",
     # SVB = ShinhanBank (thực tế alias dùng phổ biến)
     "svb": "shbvn",
-    # VietCapitalBank
-    "vietcapitalbank":"vcb2","bancviet":"vcb2","banviet":"vcb2",
+
     # ViettelMoney
     "viettelmoney":"viettelm","viettelm":"viettelm",
     # VNPTMoney
@@ -389,6 +391,25 @@ BANK_ALIAS: dict[str, str] = {
     "citibank":"citibank","citibankhn":"citibank",
     # BNPHN/BNPHCM
     "bnp":"bnphn","bnphn":"bnphn","bnphcm":"bnphcm",
+    # Alias bổ sung từ danh sách VietQR
+    "mbbank":"mb","mbnk":"mb",                            # MB thêm
+    "saigonbanksgbl":"sgbl","sgbl":"sgbl",                # SaigonBank
+    "scbbank":"scb","saigon":"scb",                       # SCB thêm
+    "seab":"seab","seabank":"seab",                       # SeABank đã có
+    "pgbank":"pgb","petrolimexbank":"pgb",                # PGBank thêm
+    "dongabank":"dab","dongabnk":"dab",                   # DongA thêm
+    "vietbanktn":"vietbank","vtb":"vietbank",             # VietBank thêm
+    "pvcom":"pvcb","pvcombnk":"pvcb",                     # PVcom thêm
+    "namabnk":"nab","namaviet":"nab",                     # NamA thêm
+    "kienlongbnk":"klb","kienlong":"klb",                 # KienLong thêm
+    "lpbnk":"lpb","locphatbank":"lpb",                    # LP thêm
+    "vttmoney":"viettelm","vtmoney":"viettelm",           # Viettel thêm
+    "vnptfintech":"vnptm","vnptfin":"vnptm",              # VNPT thêm
+    "tpbnk":"tpb","tienphongbank":"tpb",                  # TP thêm
+    "liobankapp":"liobank",                               # Lio thêm
+    "ubankvpb":"ubank","ubankbyvpb":"ubank",              # Ubank thêm
+    "cakebank":"cake","cakevpb":"cake",                   # Cake thêm
+    "timobank":"timo","timobvb":"timo",                   # Timo thêm
 }
 
 def _vi_normalize(text: str) -> str:
