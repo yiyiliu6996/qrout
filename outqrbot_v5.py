@@ -1527,6 +1527,8 @@ async def cmd_start(message: Message) -> None:
 
         "🛡 <b>ADMIN</b>\n"
         "/update — Import danh sách TK whitelist (.txt)\n"
+        "/addbank [Bank-MãTB-Tên-STK] — Thêm 1 TK vào whitelist\n"
+        "/deletebank [STK] — Xóa hẳn TK khỏi whitelist\n"
         "/listbank — Xem danh sách TK whitelist\n"
         "/tatbank [STK...] — Tắt 1 hoặc nhiều TK\n"
         "/mobank [STK...] — Mở lại TK\n"
@@ -2228,8 +2230,129 @@ _update_sessions: dict[int, float] = {}   # user_id → timestamp bắt đầu c
 _UPDATE_TIMEOUT = 300   # 5 phút
 
 
-@dp.message(Command("listbank"))
-async def cmd_listbank(message: Message) -> None:
+@dp.message(Command("addbank"))
+async def cmd_addbank(message: Message) -> None:
+    """
+    Thêm 1 TK vào whitelist trực tiếp không cần file txt.
+    Dùng trong group kích hoạt hoặc DM.
+    Format: /addbank Bank - MãTB - Tên - STK
+    Ví dụ: /addbank SEABANK - 1436 - Nguyễn Thị A - 000006250473
+    """
+    if not message.from_user:
+        return
+    is_dm = message.chat.id > 0
+    if not is_dm and not chat_is_active(message.chat.id):
+        return
+    if not await is_bot_admin(0, message.from_user.id):
+        await message.reply("❌ Chỉ admin mới dùng được lệnh này.")
+        return
+
+    parts_raw = message.text.split(maxsplit=1)
+    if len(parts_raw) < 2 or not parts_raw[1].strip():
+        await message.reply(
+            "❌ Cú pháp: /addbank Bank - MãTB - Tên - STK\n"
+            "Ví dụ: /addbank SEABANK - 1436 - Nguyễn Thị A - 000006250473",
+            parse_mode="HTML"
+        )
+        return
+
+    line = parts_raw[1].strip()
+    parts = [p.strip() for p in re.split(r"\s*-\s*", line) if p.strip()]
+
+    if len(parts) >= 4:
+        bank        = parts[0]
+        device_code = parts[1]
+        name        = " ".join(parts[2:-1])
+        account     = re.sub(r"\D", "", parts[-1])
+    elif len(parts) == 3:
+        bank, name, account = parts[0], parts[1], re.sub(r"\D", "", parts[2])
+        device_code = ""
+    elif len(parts) == 2:
+        bank, account = parts[0], re.sub(r"\D", "", parts[1])
+        name = device_code = ""
+    else:
+        await message.reply("❌ Không đọc được thông tin. Kiểm tra lại format.")
+        return
+
+    if not account or len(account) < 6:
+        await message.reply(f"❌ STK '<code>{account}</code>' không hợp lệ.", parse_mode="HTML")
+        return
+
+    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    conn = db_connect()
+    cur  = conn.cursor()
+    cur.execute("""
+        INSERT INTO receiver_whitelist (bank, device_code, account, name, is_active, added_at, added_by)
+        VALUES (?,?,?,?,1,?,?)
+        ON CONFLICT(account) DO UPDATE SET
+            bank=excluded.bank, device_code=excluded.device_code,
+            name=excluded.name, is_active=1, added_at=excluded.added_at
+    """, (bank, device_code, account, name, ts, message.from_user.id))
+    conn.commit()
+    conn.close()
+
+    adder = message.from_user.username or message.from_user.full_name or str(message.from_user.id)
+    await message.reply(
+        f"✅ Đã thêm vào whitelist:\n"
+        f"  🏦 <b>[{bank.upper()}]</b>  <b>{name}</b>  —  <code>{account}</code>",
+        parse_mode="HTML"
+    )
+    await notify_system(
+        message.bot,
+        f"➕ <b>/addbank</b> bởi @{adder}\n"
+        f"  [{bank.upper()}] {name} — <code>{account}</code>"
+    )
+
+
+@dp.message(Command("deletebank"))
+async def cmd_deletebank(message: Message) -> None:
+    """
+    Xóa hẳn TK khỏi whitelist (khác /tatbank chỉ tắt).
+    Format: /deletebank STK1 STK2 ...
+    Ví dụ: /deletebank 000006250473 000004547061
+    """
+    if not message.from_user:
+        return
+    is_dm = message.chat.id > 0
+    if not is_dm and not chat_is_active(message.chat.id):
+        return
+    if not await is_bot_admin(0, message.from_user.id):
+        await message.reply("❌ Chỉ admin mới dùng được lệnh này.")
+        return
+
+    parts = message.text.split()[1:]
+    if not parts:
+        await message.reply("❌ Dùng: /deletebank <STK1> <STK2> ...\nVí dụ: /deletebank 000006250473")
+        return
+
+    conn = db_connect()
+    cur  = conn.cursor()
+    results = []
+    for stk in parts:
+        stk = re.sub(r"\D", "", stk.strip())
+        cur.execute("SELECT name, bank FROM receiver_whitelist WHERE account=?", (stk,))
+        row = cur.fetchone()
+        if not row:
+            results.append(f"❌ <code>{stk}</code> không có trong whitelist")
+        else:
+            cur.execute("DELETE FROM receiver_whitelist WHERE account=?", (stk,))
+            results.append(f"🗑 <code>{stk}</code> — {row['name']} [{(row['bank'] or '').upper()}] đã xóa")
+    conn.commit()
+    conn.close()
+
+    result_text = "\n".join(results)
+    await message.reply(
+        f"<b>Kết quả /deletebank:</b>\n{result_text}",
+        parse_mode="HTML"
+    )
+    deleter = message.from_user.username or message.from_user.full_name or str(message.from_user.id)
+    await notify_system(
+        message.bot,
+        f"🗑 <b>/deletebank</b> bởi @{deleter}\n{result_text}"
+    )
+
+
+
     if not chat_is_active(message.chat.id):
         return
 
@@ -2705,28 +2828,30 @@ async def cb_sent(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("Đơn này đã được gửi hoặc xử lý rồi.", show_alert=True)
             return
 
-    # Gửi card vào Group Collect
-    collect_mid = await _send_collect_card(bot, order_code)
+        # Gửi card vào Group Collect
+        logger.info("Gửi collect card: order=%s COLLECT_GROUP_ID=%s", order_code, COLLECT_GROUP_ID)
+        collect_mid = await _send_collect_card(bot, order_code)
+        logger.info("collect_mid=%s", collect_mid)
 
-    # Cập nhật DB
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE orders SET status='sent', collect_message_id=? WHERE order_code=?",
-        (collect_mid, order_code)
-    )
-    conn.commit()
-    conn.close()
+        # Cập nhật DB
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE orders SET status='sent', collect_message_id=? WHERE order_code=?",
+            (collect_mid, order_code)
+        )
+        conn.commit()
+        conn.close()
 
-    # Update button → [⏳ Chờ bill]
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="⏳ Chờ bill...", callback_data=f"noop:{order_code}"),
-        InlineKeyboardButton(text="❌ Hủy đơn",    callback_data=f"cancel:{order_code}"),
-    ]])
-    try:
-        await callback.message.edit_reply_markup(reply_markup=kb)
-    except Exception:
-        pass
+        # Update button → [⏳ Chờ bill]
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⏳ Chờ bill...", callback_data=f"noop:{order_code}"),
+            InlineKeyboardButton(text="❌ Hủy đơn",    callback_data=f"cancel:{order_code}"),
+        ]])
+        try:
+            await callback.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
 
         await callback.answer("✅ Đã gửi đơn sang group collect!")
 
