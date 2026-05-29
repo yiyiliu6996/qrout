@@ -740,12 +740,12 @@ def parse_order_form(text: str) -> Dict[str, Any]:
     }
 
 
-def generate_order_code() -> str:
+def generate_order_code(prefix: str = "NO") -> str:
     """
-    Format: NO + DDHHMMSS[+seq nếu trùng].
-    An toàn với concurrent requests nhờ DB UNIQUE constraint.
+    Format: {prefix} + DDHHMMSS[+seq nếu trùng].
+    prefix = "NO" (mặc định) hoặc "BO" (khi form có dòng BO đầu).
     """
-    base = "NO" + now_local().strftime("%d%H%M%S")
+    base = prefix + now_local().strftime("%d%H%M%S")
     conn = db_connect()
     cur = conn.cursor()
     candidate = base
@@ -1344,11 +1344,12 @@ def export_orders_to_excel(rows: List[sqlite3.Row], output_path: str) -> None:
     # ── Sheet 2: Tổng hợp ────────────────────────────────────────────────────
     ws_sum = wb.create_sheet("Tổng Hợp")
 
-    # ── Thu thập dữ liệu ──────────────────────────────────────────────────────
-    # Bank nhận: group theo (bank, stk, tên)
-    recv_detail: dict[str, dict] = {}   # key = "BANK|STK"
-    send_detail: dict[str, dict] = {}   # key = "BANK|STK"
+    # ── Thu thập dữ liệu — chỉ đơn HOÀN THÀNH ───────────────────────────────
+    recv_detail: dict[str, dict] = {}
+    send_detail: dict[str, dict] = {}
     for row in rows:
+        if row["status"] != "completed":
+            continue
         rk = f"{(row['receiver_bank'] or '?').upper()}|{row['receiver_account'] or '?'}"
         sk = f"{(row['sender_bank'] or '?').upper()}|{row['sender_account'] or '?'}"
         if rk not in recv_detail:
@@ -2753,9 +2754,15 @@ async def handle_text(message: Message, bot: Bot) -> None:
             return
         _last_form_time[uid] = now_ts
 
+    # --- Detect prefix BO (dòng đầu tiên chứa "BO") ---
+    first_line = text.strip().splitlines()[0].strip().upper() if text.strip() else ""
+    is_bo = bool(re.match(r"^BO\b", first_line))
+    # Nếu có prefix BO → bỏ dòng đó trước khi parse form
+    form_text = "\n".join(text.strip().splitlines()[1:]).strip() if is_bo else text
+
     # --- Parse form ---
     try:
-        parsed = parse_order_form(text)
+        parsed = parse_order_form(form_text)
     except Exception as parse_err:
         logger.info("[DEBUG] Parse form thất bại: %s | text=%r", parse_err, text[:80])
         return
@@ -2769,7 +2776,7 @@ async def handle_text(message: Message, bot: Bot) -> None:
         )
         return
 
-    order_code = generate_order_code()
+    order_code = generate_order_code(prefix="BO" if is_bo else "NO")
 
     try:
         sent_ids = await send_order_qrs(bot, message, order_code, parsed)
@@ -3100,7 +3107,11 @@ async def _daily_report_loop(bot: Bot) -> None:
     """
     REPORT_HOUR   = 0
     REPORT_MINUTE = 0
+    PIN_HOUR      = 12
+    PIN_MINUTE    = 0
     last_report_date: Optional[str] = None
+    last_pin_date:    Optional[str] = None
+    _report_files: dict[int, str] = {}
 
     while True:
         try:
@@ -3163,13 +3174,65 @@ async def _daily_report_loop(bot: Bot) -> None:
                         except Exception as e:
                             logger.warning("Gửi báo cáo group %s thất bại: %s", chat_id, e)
 
+                    # Lưu path file để pin lúc 12h
+                    _report_files[chat_id] = fpath
+
                     logger.info("Báo cáo %s group %s: %d đơn", today_str, chat_id, total_orders)
+
+                # ── Tổng kết gửi NOTIFY_GROUP ─────────────────────────────────────
+                if NOTIFY_GROUP_ID and has_any:
+                    # Tính tổng completed toàn bộ group
+                    all_rows = fetch_by_date(report_date)
+                    done_rows = [r for r in all_rows if r["status"] == "completed"]
+                    total_send = sum(r["amount"] for r in done_rows)
+                    total_recv = sum(r["amount"] for r in done_rows)
+                    n_done     = len(set(r["order_code"] for r in done_rows))
+                    try:
+                        await bot.send_message(
+                            chat_id=NOTIFY_GROUP_ID,
+                            text=(
+                                f"📅 <b>Tổng kết ngày {report_date}</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"✅ Đơn hoàn thành: <b>{n_done}</b>\n"
+                                f"💸 Tổng bank chuyển: <b><code>{format_money(total_send)}</code></b>\n"
+                                f"💰 Tổng bank nhận: <b><code>{format_money(total_recv)}</code></b>"
+                            ),
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        logger.warning("Gửi tổng kết notify thất bại: %s", e)
 
                 if not has_any:
                     await notify_system(bot,
                         f"📊 <b>Báo cáo ngày {report_date}</b>\n\nKhông có đơn nào trong ngày hôm nay.")
 
                 last_report_date = today_str
+
+            # ── 12:00 — Pin file Excel hôm qua vào group QR ──────────────────
+            if (now.hour == PIN_HOUR and now.minute >= PIN_MINUTE
+                    and last_pin_date != today_str
+                    and _report_files):
+                for chat_id, fpath in list(_report_files.items()):
+                    if not os.path.exists(fpath):
+                        continue
+                    try:
+                        from aiogram.types import FSInputFile
+                        pin_date = (now - __import__("datetime").timedelta(days=1)).strftime("%d-%m-%Y")
+                        sent = await bot.send_document(
+                            chat_id=chat_id,
+                            document=FSInputFile(fpath, filename=f"baocao_{pin_date}.xlsx"),
+                            caption=f"📌 <b>Báo cáo ngày {pin_date}</b>",
+                            parse_mode="HTML",
+                        )
+                        await bot.pin_chat_message(
+                            chat_id=chat_id,
+                            message_id=sent.message_id,
+                            disable_notification=True,
+                        )
+                        logger.info("Đã pin báo cáo %s vào group %s", pin_date, chat_id)
+                    except Exception as e:
+                        logger.warning("Pin file group %s thất bại: %s", chat_id, e)
+                last_pin_date = today_str
 
         except Exception as e:
             logger.error("_daily_report_loop lỗi: %s", e)
