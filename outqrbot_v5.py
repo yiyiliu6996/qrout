@@ -3107,11 +3107,7 @@ async def _daily_report_loop(bot: Bot) -> None:
     """
     REPORT_HOUR   = 0
     REPORT_MINUTE = 0
-    PIN_HOUR      = 12
-    PIN_MINUTE    = 0
     last_report_date: Optional[str] = None
-    last_pin_date:    Optional[str] = None
-    _report_files: dict[int, str] = {}
 
     while True:
         try:
@@ -3125,7 +3121,8 @@ async def _daily_report_loop(bot: Bot) -> None:
                 from datetime import timedelta
                 report_date = (now - timedelta(days=1)).strftime("%d/%m/%Y")
                 safe_date   = (now - timedelta(days=1)).strftime("%d-%m-%Y")
-                cur = conn.cursor()
+                conn = db_connect()
+                cur  = conn.cursor()
                 cur.execute("SELECT DISTINCT chat_id FROM activated_chats")
                 active_chats = [r["chat_id"] for r in cur.fetchall()]
                 conn.close()
@@ -3163,16 +3160,22 @@ async def _daily_report_loop(bot: Bot) -> None:
 
                         from aiogram.types import FSInputFile
 
-                        # Gửi về đúng Group QR
+                        # Gửi file vào Group QR + pin luôn
                         try:
-                            await bot.send_document(
+                            sent = await bot.send_document(
                                 chat_id=chat_id,
                                 document=FSInputFile(fpath, filename=fname_xlsx),
                                 caption=caption,
                                 parse_mode="HTML",
                             )
+                            # Pin luôn sau khi gửi
+                            await bot.pin_chat_message(
+                                chat_id=chat_id,
+                                message_id=sent.message_id,
+                                disable_notification=True,
+                            )
                         except Exception as e:
-                            logger.warning("Gửi báo cáo group %s thất bại: %s", chat_id, e)
+                            logger.warning("Gửi/pin báo cáo group %s thất bại: %s", chat_id, e)
 
                     # Lưu path file để pin lúc 12h
                     _report_files[chat_id] = fpath
@@ -3207,32 +3210,6 @@ async def _daily_report_loop(bot: Bot) -> None:
                         f"📊 <b>Báo cáo ngày {report_date}</b>\n\nKhông có đơn nào trong ngày hôm nay.")
 
                 last_report_date = today_str
-
-            # ── 12:00 — Pin file Excel hôm qua vào group QR ──────────────────
-            if (now.hour == PIN_HOUR and now.minute >= PIN_MINUTE
-                    and last_pin_date != today_str
-                    and _report_files):
-                for chat_id, fpath in list(_report_files.items()):
-                    if not os.path.exists(fpath):
-                        continue
-                    try:
-                        from aiogram.types import FSInputFile
-                        pin_date = (now - __import__("datetime").timedelta(days=1)).strftime("%d-%m-%Y")
-                        sent = await bot.send_document(
-                            chat_id=chat_id,
-                            document=FSInputFile(fpath, filename=f"baocao_{pin_date}.xlsx"),
-                            caption=f"📌 <b>Báo cáo ngày {pin_date}</b>",
-                            parse_mode="HTML",
-                        )
-                        await bot.pin_chat_message(
-                            chat_id=chat_id,
-                            message_id=sent.message_id,
-                            disable_notification=True,
-                        )
-                        logger.info("Đã pin báo cáo %s vào group %s", pin_date, chat_id)
-                    except Exception as e:
-                        logger.warning("Pin file group %s thất bại: %s", chat_id, e)
-                last_pin_date = today_str
 
         except Exception as e:
             logger.error("_daily_report_loop lỗi: %s", e)
