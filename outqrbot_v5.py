@@ -2404,6 +2404,64 @@ async def cmd_deletebank(message: Message) -> None:
         await message.reply(chunk + suffix, parse_mode=ParseMode.HTML)
 
 
+@dp.message(Command("listbank"))
+async def cmd_listbank(message: Message) -> None:
+    """Xem danh sách TK whitelist — group kích hoạt hoặc admin/superadmin DM."""
+    if not message.from_user:
+        return
+    is_dm = message.chat.id > 0
+    if not is_dm and not chat_is_active(message.chat.id):
+        return
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT bank, device_code, account, name, is_active
+        FROM receiver_whitelist
+        ORDER BY added_at ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await message.reply(
+            "📋 Whitelist trống. Dùng /update hoặc /addbank để thêm.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    n_open  = sum(1 for r in rows if r["is_active"])
+    n_close = len(rows) - n_open
+
+    lines = [
+        f"📋 <b>Whitelist TK người nhận</b>  ✅ {n_open} Mở  |  ❌ {n_close} Tắt",
+        "─────────────────────────────",
+    ]
+    for i, r in enumerate(rows, 1):
+        status  = "🟢" if r["is_active"] else "🔴"
+        bank    = (r["bank"] or "").upper()
+        dev     = r["device_code"] or ""
+        dev_str = f" <code>{dev}</code>" if dev else ""
+        lines.append(
+            f"{i}. {status} <b>[{bank}]</b>{dev_str}  <b>{r['name']}</b>  —  <code>{r['account']}</code>"
+        )
+
+    # Gửi theo chunk nếu quá dài
+    chunks, current = [], ""
+    for line in lines:
+        if len(current) + len(line) + 1 > 3800:
+            chunks.append(current)
+            current = line
+        else:
+            current = (current + "\n" + line) if current else line
+    if current:
+        chunks.append(current)
+
+    for i, chunk in enumerate(chunks):
+        suffix = f"\n<i>Trang {i+1}/{len(chunks)}</i>" if len(chunks) > 1 else ""
+        await message.reply(chunk + suffix, parse_mode=ParseMode.HTML)
+
+
 @dp.message(Command("tatbank"))
 async def cmd_tatbank(message: Message) -> None:
     """Tắt 1 hoặc nhiều STK. /tatbank STK1 STK2 STK3"""
@@ -3114,7 +3172,7 @@ async def _daily_report_loop(bot: Bot) -> None:
             now = now_local()
             today_str = now.strftime("%d/%m/%Y")
 
-            if (now.hour == REPORT_HOUR and now.minute >= REPORT_MINUTE
+            if (now.hour == REPORT_HOUR and now.minute == REPORT_MINUTE
                     and last_report_date != today_str):
 
                 # Báo cáo lúc 00:00 → lấy dữ liệu ngày HÔM QUA
